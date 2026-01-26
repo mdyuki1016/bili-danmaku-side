@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Bilibili Danmaku Side List",
+  "version": "0.1.0",
+  "description": "Show danmaku on the right in time order with playback sync.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://api.bilibili.com/*",
+    "https://www.bilibili.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.bilibili.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["style.css"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_origin_as_fallback": true
+    }
+  ]
+}
