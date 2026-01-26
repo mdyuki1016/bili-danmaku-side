@@ -12,7 +12,8 @@
 
   const defaultSettings = {
     enabled: true,
-    fontSize: 14
+    fontSize: 14,
+    theme: "light"
   };
 
   function loadSettings() {
@@ -21,7 +22,8 @@
         chrome.storage.local.get(defaultSettings, (items) => {
           resolve({
             enabled: Boolean(items.enabled),
-            fontSize: Number(items.fontSize) || defaultSettings.fontSize
+            fontSize: Number(items.fontSize) || defaultSettings.fontSize,
+            theme: items.theme === "dark" ? "dark" : "light"
           });
         });
       } catch {
@@ -159,6 +161,22 @@
     return best || videos[0];
   }
 
+  function readCurrentTime(video) {
+    if (!video) return 0;
+    const t = Number(video.currentTime);
+    if (Number.isFinite(t) && t > 0) return t;
+    try {
+      const p = window.player;
+      if (p && typeof p.getCurrentTime === "function") {
+        const pt = Number(p.getCurrentTime());
+        if (Number.isFinite(pt) && pt >= 0) return pt;
+      }
+    } catch {
+      // ignore
+    }
+    return Number.isFinite(t) ? t : 0;
+  }
+
   function findDanmakuListElement() {
     const selectors = [
       "#danmaku-box",
@@ -266,6 +284,17 @@
     const controls = document.createElement("div");
     controls.className = `${EXT_ID}-controls`;
 
+    const themeBtn = document.createElement("button");
+    themeBtn.type = "button";
+    themeBtn.className = `${EXT_ID}-theme`;
+    themeBtn.textContent = settings.theme === "dark" ? "Dark" : "Light";
+    themeBtn.addEventListener("click", () => {
+      settings.theme = settings.theme === "dark" ? "light" : "dark";
+      themeBtn.textContent = settings.theme === "dark" ? "Dark" : "Light";
+      panel.dataset.theme = settings.theme;
+      saveSettings(settings);
+    });
+
     const fontLabel = document.createElement("label");
     fontLabel.textContent = "字号";
     const fontInput = document.createElement("input");
@@ -315,6 +344,7 @@
     mountRoot(root);
 
     panel.style.setProperty("--dm-font-size", `${settings.fontSize}px`);
+    panel.dataset.theme = settings.theme;
 
     function setEnabled(enabled) {
       settings.enabled = enabled;
@@ -328,6 +358,7 @@
 
     setEnabled(settings.enabled);
 
+    controls.appendChild(themeBtn);
     return { root, panel, list, status, settings, setEnabled };
   }
 
@@ -437,11 +468,25 @@
     let lastIndex = -1;
     let lastTime = -1;
 
+    const jumpToTime = (t) => {
+      const idx = findIndexByTime(times, t);
+      if (idx < 0 || !items[idx]) return;
+      if (lastIndex >= 0 && items[lastIndex]) {
+        items[lastIndex].classList.remove("is-current");
+      }
+      const el = items[idx];
+      el.classList.add("is-current");
+      const top = el.offsetTop - listEl.clientHeight * 0.3;
+      listEl.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+      lastIndex = idx;
+      lastTime = t;
+    };
+
     const tick = () => {
       if (!settings.enabled) return;
       if (!video || video.readyState < 1) return;
 
-      const t = video.currentTime || 0;
+      const t = readCurrentTime(video);
       if (Math.abs(t - lastTime) < 0.05) return;
       lastTime = t;
       const idx = findIndexByTime(times, t);
@@ -461,19 +506,42 @@
 
     const onTimeUpdate = () => tick();
     const onSeeking = () => tick();
-    const onPlay = () => tick();
+    const onSeeked = () => jumpToTime(readCurrentTime(video));
+    const onLoadedMeta = () => jumpToTime(readCurrentTime(video));
+    const onPlay = () => {
+      jumpToTime(readCurrentTime(video));
+      tick();
+    };
 
     video.addEventListener("timeupdate", onTimeUpdate);
     video.addEventListener("seeking", onSeeking);
+    video.addEventListener("seeked", onSeeked);
+    video.addEventListener("loadedmetadata", onLoadedMeta);
     video.addEventListener("play", onPlay);
-    video.__biliDmSideHandlers = { onTimeUpdate, onSeeking, onPlay };
+    video.__biliDmSideHandlers = {
+      onTimeUpdate,
+      onSeeking,
+      onSeeked,
+      onLoadedMeta,
+      onPlay
+    };
 
     syncTimer = setInterval(() => {
       if (video !== boundVideo) return;
       tick();
     }, 200);
 
-    tick();
+    // Initial jump after render/layout + a short retry window
+    let tries = 0;
+    const alignTimer = setInterval(() => {
+      if (video !== boundVideo) {
+        clearInterval(alignTimer);
+        return;
+      }
+      jumpToTime(readCurrentTime(video));
+      tries += 1;
+      if (tries >= 12) clearInterval(alignTimer);
+    }, 250);
   }
 
   function cleanup() {
@@ -487,6 +555,8 @@
       const h = boundVideo.__biliDmSideHandlers;
       boundVideo.removeEventListener("timeupdate", h.onTimeUpdate);
       boundVideo.removeEventListener("seeking", h.onSeeking);
+      boundVideo.removeEventListener("seeked", h.onSeeked);
+      boundVideo.removeEventListener("loadedmetadata", h.onLoadedMeta);
       boundVideo.removeEventListener("play", h.onPlay);
       delete boundVideo.__biliDmSideHandlers;
     }
@@ -500,7 +570,7 @@
     const ui = ensureUI(settings);
     mountRoot(ui.root);
     startMountObserver(ui.root);
-    const video = getBestVideo();
+    let video = getBestVideo();
 
     if (!video) {
       ui.status.textContent = "未找到视频元素";
@@ -522,6 +592,13 @@
       }
       renderDanmaku(ui.list, items);
       startSync(video, ui.list, ui.settings);
+      setInterval(() => {
+        const v = getBestVideo();
+        if (v && v !== boundVideo) {
+          boundVideo = v;
+          startSync(v, ui.list, ui.settings);
+        }
+      }, 1000);
     } catch (err) {
       ui.status.textContent = "弹幕加载失败";
       console.warn("[bili-dm-side] fetch failed", err);
