@@ -8,6 +8,7 @@
   let uiCache = null;
   let mountObserver = null;
   let syncTimer = null;
+  let videoSwitchTimer = null;
   let boundVideo = null;
 
   const defaultSettings = {
@@ -388,13 +389,40 @@
     if (abortCtrl) abortCtrl.abort();
     abortCtrl = new AbortController();
 
-    const url = `https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`;
-    const res = await fetch(url, {
-      signal: abortCtrl.signal,
-      credentials: "include"
-    });
-    if (!res.ok) throw new Error(`弹幕接口失败: ${res.status}`);
-    const xmlText = await res.text();
+    const endpoints = [
+      `https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`,
+      `https://comment.bilibili.com/${cid}.xml`
+    ];
+    let xmlText = "";
+    let lastStatus = 0;
+    let lastErr = null;
+
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, {
+          signal: abortCtrl.signal,
+          credentials: "include",
+          referrer: location.href,
+          headers: {
+            Accept: "text/xml,application/xml,text/plain,*/*"
+          }
+        });
+        if (!res.ok) {
+          lastStatus = res.status;
+          continue;
+        }
+        xmlText = await res.text();
+        if (xmlText && xmlText.includes("<d")) break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    if (!xmlText) {
+      if (lastErr) throw lastErr;
+      throw new Error(`弹幕接口失败: ${lastStatus || "unknown"}`);
+    }
+
     const doc = new DOMParser().parseFromString(xmlText, "text/xml");
     const nodes = Array.from(doc.querySelectorAll("d"));
 
@@ -531,17 +559,12 @@
       tick();
     }, 200);
 
-    // Initial jump after render/layout + a short retry window
-    let tries = 0;
-    const alignTimer = setInterval(() => {
-      if (video !== boundVideo) {
-        clearInterval(alignTimer);
-        return;
+    // One-shot initial align; avoid repeated forced jumps on first load.
+    setTimeout(() => {
+      if (video === boundVideo) {
+        jumpToTime(readCurrentTime(video));
       }
-      jumpToTime(readCurrentTime(video));
-      tries += 1;
-      if (tries >= 12) clearInterval(alignTimer);
-    }, 250);
+    }, 350);
   }
 
   function cleanup() {
@@ -551,6 +574,8 @@
     rafId = null;
     if (syncTimer) clearInterval(syncTimer);
     syncTimer = null;
+    if (videoSwitchTimer) clearInterval(videoSwitchTimer);
+    videoSwitchTimer = null;
     if (boundVideo && boundVideo.__biliDmSideHandlers) {
       const h = boundVideo.__biliDmSideHandlers;
       boundVideo.removeEventListener("timeupdate", h.onTimeUpdate);
@@ -592,11 +617,26 @@
       }
       renderDanmaku(ui.list, items);
       startSync(video, ui.list, ui.settings);
-      setInterval(() => {
+      let lastCandidate = boundVideo;
+      let stableHit = 0;
+      videoSwitchTimer = setInterval(() => {
         const v = getBestVideo();
         if (v && v !== boundVideo) {
-          boundVideo = v;
-          startSync(v, ui.list, ui.settings);
+          if (v === lastCandidate) {
+            stableHit += 1;
+          } else {
+            lastCandidate = v;
+            stableHit = 1;
+          }
+          if (stableHit >= 2) {
+            boundVideo = v;
+            startSync(v, ui.list, ui.settings);
+            stableHit = 0;
+            lastCandidate = v;
+          }
+        } else {
+          lastCandidate = boundVideo;
+          stableHit = 0;
         }
       }, 1000);
     } catch (err) {
